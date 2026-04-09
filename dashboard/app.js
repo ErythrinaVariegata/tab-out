@@ -912,6 +912,126 @@ function renderDomainCard(group, groupIndex) {
 
 
 /* ----------------------------------------------------------------
+   DEFERRED TABS — "Saved for Later" checklist column
+
+   Fetches deferred tabs from the server and renders:
+   1. Active items as a checklist (checkbox + title + dismiss)
+   2. Archived items in a collapsible section with search
+   ---------------------------------------------------------------- */
+
+/**
+ * renderDeferredColumn()
+ *
+ * Fetches all deferred tabs (active + archived) from the API and
+ * renders them into the right-side column. Called on every dashboard
+ * load — both static and AI views.
+ */
+async function renderDeferredColumn() {
+  const column    = document.getElementById('deferredColumn');
+  const list      = document.getElementById('deferredList');
+  const empty     = document.getElementById('deferredEmpty');
+  const countEl   = document.getElementById('deferredCount');
+  const archiveEl = document.getElementById('deferredArchive');
+  const archiveCountEl = document.getElementById('archiveCount');
+  const archiveList    = document.getElementById('archiveList');
+
+  if (!column) return;
+
+  try {
+    const res = await fetch('/api/deferred');
+    if (!res.ok) throw new Error('Failed to fetch deferred tabs');
+    const data = await res.json();
+
+    const active   = data.active || [];
+    const archived = data.archived || [];
+
+    // Show or hide the entire column based on whether there's anything to show
+    if (active.length === 0 && archived.length === 0) {
+      column.style.display = 'none';
+      return;
+    }
+
+    column.style.display = 'block';
+
+    // Render active checklist items
+    if (active.length > 0) {
+      countEl.textContent = `${active.length} item${active.length !== 1 ? 's' : ''}`;
+      list.innerHTML = active.map(item => renderDeferredItem(item)).join('');
+      list.style.display = 'block';
+      empty.style.display = 'none';
+    } else {
+      list.style.display = 'none';
+      countEl.textContent = '';
+      empty.style.display = 'block';
+    }
+
+    // Render archive section
+    if (archived.length > 0) {
+      archiveCountEl.textContent = `(${archived.length})`;
+      archiveList.innerHTML = archived.map(item => renderArchiveItem(item)).join('');
+      archiveEl.style.display = 'block';
+    } else {
+      archiveEl.style.display = 'none';
+    }
+
+  } catch (err) {
+    console.warn('[TMC] Could not load deferred tabs:', err);
+    column.style.display = 'none';
+  }
+}
+
+/**
+ * renderDeferredItem(item)
+ *
+ * Builds the HTML for a single checklist item in the Saved for Later column.
+ * Each item has: checkbox, title (clickable link), domain, time ago, dismiss X.
+ */
+function renderDeferredItem(item) {
+  let domain = '';
+  try { domain = new URL(item.url).hostname.replace(/^www\./, ''); } catch {}
+  const faviconUrl = `https://www.google.com/s2/favicons?domain=${domain}&sz=16`;
+  const ago = timeAgo(item.deferred_at);
+
+  return `
+    <div class="deferred-item" data-deferred-id="${item.id}">
+      <input type="checkbox" class="deferred-checkbox" data-action="check-deferred" data-deferred-id="${item.id}">
+      <div class="deferred-info">
+        <a href="${item.url}" target="_blank" rel="noopener" class="deferred-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
+          <img src="${faviconUrl}" alt="" style="width:14px;height:14px;vertical-align:-2px;margin-right:4px" onerror="this.style.display='none'">${item.title || item.url}
+        </a>
+        <div class="deferred-meta">
+          <span>${domain}</span>
+          <span>${ago}</span>
+        </div>
+      </div>
+      <button class="deferred-dismiss" data-action="dismiss-deferred" data-deferred-id="${item.id}" title="Dismiss">
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18 18 6M6 6l12 12" /></svg>
+      </button>
+    </div>`;
+}
+
+/**
+ * renderArchiveItem(item)
+ *
+ * Builds the HTML for a single item in the collapsed archive list.
+ * Simpler than active items — just title link + date.
+ */
+function renderArchiveItem(item) {
+  let domain = '';
+  try { domain = new URL(item.url).hostname.replace(/^www\./, ''); } catch {}
+  const ago = item.archived_at ? timeAgo(item.archived_at) : '';
+
+  return `
+    <div class="archive-item">
+      <a href="${item.url}" target="_blank" rel="noopener" class="archive-item-title" title="${(item.title || '').replace(/"/g, '&quot;')}">
+        ${item.title || item.url}
+      </a>
+      <span class="archive-item-date">${ago}</span>
+    </div>`;
+}
+
+
+/* ----------------------------------------------------------------
    MAIN DASHBOARD RENDERERS
 
    Two modes:
@@ -1066,6 +1186,9 @@ async function renderStaticDashboard() {
   // Hide nudge banner
   const nudgeBanner = document.getElementById('nudgeBanner');
   if (nudgeBanner) nudgeBanner.style.display = 'none';
+
+  // ── Step 9: Render the "Saved for Later" checklist column ────────────────
+  await renderDeferredColumn();
 }
 
 
@@ -1218,6 +1341,9 @@ async function renderAIDashboard(options = {}) {
       lastRefreshEl.textContent = 'History not yet analyzed';
     }
   }
+
+  // Render the "Saved for Later" checklist column
+  await renderDeferredColumn();
 }
 
 

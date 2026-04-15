@@ -652,6 +652,141 @@ function cleanTitle(title, hostname) {
   return title;
 }
 
+/**
+ * extractUrlHint(url)
+ *
+ * Extracts a short, distinctive hint from a URL's path or query params.
+ * Used to disambiguate tabs that share the same title under the same domain.
+ *
+ * Strategy:
+ * 1. Look for path segments that look like unique IDs (e.g. ms-xgfhngph)
+ * 2. Fall back to the last meaningful path segment
+ * 3. Include distinguishing query params if paths are identical
+ *
+ * Returns a short string like "ms-xgfhngph" or "/detail/abc"
+ */
+function extractUrlHint(url) {
+  try {
+    const parsed = new URL(url);
+    const pathname = parsed.pathname;
+    const segments = pathname.split('/').filter(Boolean);
+
+    // Look for segments that look like unique IDs:
+    // - contain mixed letters+digits (like ms-xgfhngph, abc123)
+    // - or are UUIDs
+    // - or are numeric IDs
+    const idPattern = /^(?:[a-zA-Z]+-[a-z0-9]{4,}|[a-z0-9]{8,}|[0-9a-f]{8}-[0-9a-f]{4}-|[a-zA-Z]*\d+[a-zA-Z0-9]*|\d{4,})$/;
+    const idSegments = segments.filter(s => idPattern.test(s));
+
+    if (idSegments.length > 0) {
+      // Return the last ID-like segment (usually the most specific)
+      return idSegments[idSegments.length - 1];
+    }
+
+    // Fall back: use the last 1-2 meaningful path segments
+    if (segments.length > 0) {
+      const tail = segments.slice(-2).join('/');
+      if (tail.length <= 40) return tail;
+      return segments[segments.length - 1].slice(0, 30);
+    }
+
+    // Last resort: use distinguishing query params
+    const params = parsed.searchParams;
+    const interesting = [];
+    for (const [k, v] of params) {
+      if (['id', 'tab', 'page', 'q', 'query', 'name', 'key', 'regionId'].includes(k)) {
+        interesting.push(`${k}=${v}`);
+      }
+    }
+    if (interesting.length > 0) return interesting.join('&').slice(0, 40);
+
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * disambiguateTabs(tabs)
+ *
+ * Given a list of tabs (already de-duped by URL), returns a Map<url, hint>
+ * where hint is a short path suffix to append to the display label for tabs
+ * that would otherwise have identical titles within the same domain group.
+ *
+ * Tabs with unique titles get no hint (empty string).
+ */
+function disambiguateTabs(tabs, domainForClean) {
+  const hintMap = new Map(); // url → hint string
+
+  // First, compute all labels
+  const labelMap = new Map(); // url → label
+  for (const tab of tabs) {
+    let label = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), domainForClean);
+    try {
+      const parsed = new URL(tab.url);
+      if (parsed.hostname === 'localhost' && parsed.port) label = `${parsed.port} ${label}`;
+    } catch {}
+    labelMap.set(tab.url, label);
+  }
+
+  // Group tabs by their computed label
+  const labelGroups = new Map(); // label → [url, url, ...]
+  for (const [url, label] of labelMap) {
+    if (!labelGroups.has(label)) labelGroups.set(label, []);
+    labelGroups.get(label).push(url);
+  }
+
+  // For groups with >1 tab sharing the same label, compute URL hints
+  for (const [, urls] of labelGroups) {
+    if (urls.length <= 1) {
+      // Unique label — no hint needed
+      for (const url of urls) hintMap.set(url, '');
+      continue;
+    }
+
+    // Multiple tabs share this label — extract hints from URLs
+    const hints = urls.map(url => extractUrlHint(url));
+
+    // Check if all hints are the same (useless), fall back to full path diff
+    const uniqueHints = new Set(hints);
+    if (uniqueHints.size === 1 && hints[0] === '') {
+      // Can't differentiate — try using query string differences
+      for (const url of urls) {
+        try {
+          const parsed = new URL(url);
+          const qs = parsed.search ? parsed.search.slice(0, 30) : '';
+          hintMap.set(url, qs || parsed.pathname.slice(-20));
+        } catch {
+          hintMap.set(url, '');
+        }
+      }
+    } else if (uniqueHints.size === 1) {
+      // All hints are the same — try adding query params to differentiate
+      for (const url of urls) {
+        try {
+          const parsed = new URL(url);
+          const hint = extractUrlHint(url);
+          const params = [];
+          for (const [k, v] of parsed.searchParams) {
+            if (k !== 'tab') params.push(`${k}=${v}`);
+          }
+          const extra = params.length > 0 ? '?' + params.slice(0, 2).join('&') : '';
+          hintMap.set(url, hint + extra.slice(0, 25));
+        } catch {
+          hintMap.set(url, '');
+        }
+      }
+    } else {
+      // Hints are different — use them directly
+      for (let i = 0; i < urls.length; i++) {
+        hintMap.set(urls[i], hints[i]);
+      }
+    }
+  }
+
+  return hintMap;
+}
+
 function smartTitle(title, url) {
   if (!url) return title || '';
   let pathname = '', hostname = '';
@@ -757,9 +892,11 @@ function checkTabOutDupes() {
    OVERFLOW CHIPS ("+N more" expand button in domain cards)
    ---------------------------------------------------------------- */
 
-function buildOverflowChips(hiddenTabs, urlCounts = {}) {
+function buildOverflowChips(hiddenTabs, urlCounts = {}, hintMap = new Map()) {
   const hiddenChips = hiddenTabs.map(tab => {
     const label    = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), '');
+    const hint     = hintMap.get(tab.url) || '';
+    const hintHtml = hint ? `<span class="chip-url-hint">/${hint.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>` : '';
     const count    = urlCounts[tab.url] || 1;
     const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
     const chipClass = count > 1 ? ' chip-has-dupes' : '';
@@ -770,7 +907,7 @@ function buildOverflowChips(hiddenTabs, urlCounts = {}) {
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
       ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
-      <span class="chip-text">${label}</span>${dupeTag}
+      <span class="chip-text">${label}${hintHtml}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
@@ -834,6 +971,9 @@ function renderDomainCard(group) {
   const visibleTabs = uniqueTabs.slice(0, 8);
   const extraCount  = uniqueTabs.length - visibleTabs.length;
 
+  // Compute disambiguation hints for tabs with identical titles
+  const hintMap = disambiguateTabs(uniqueTabs, group.domain);
+
   const pageChips = visibleTabs.map(tab => {
     let label = cleanTitle(smartTitle(stripTitleNoise(tab.title || ''), tab.url), group.domain);
     // For localhost tabs, prepend port number so you can tell projects apart
@@ -841,6 +981,8 @@ function renderDomainCard(group) {
       const parsed = new URL(tab.url);
       if (parsed.hostname === 'localhost' && parsed.port) label = `${parsed.port} ${label}`;
     } catch {}
+    const hint = hintMap.get(tab.url) || '';
+    const hintHtml = hint ? `<span class="chip-url-hint">/${hint.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</span>` : '';
     const count    = urlCounts[tab.url];
     const dupeTag  = count > 1 ? ` <span class="chip-dupe-badge">(${count}x)</span>` : '';
     const chipClass = count > 1 ? ' chip-has-dupes' : '';
@@ -851,7 +993,7 @@ function renderDomainCard(group) {
     const faviconUrl = domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=16` : '';
     return `<div class="page-chip clickable${chipClass}" data-action="focus-tab" data-tab-url="${safeUrl}" title="${safeTitle}">
       ${faviconUrl ? `<img class="chip-favicon" src="${faviconUrl}" alt="" onerror="this.style.display='none'">` : ''}
-      <span class="chip-text">${label}</span>${dupeTag}
+      <span class="chip-text">${label}${hintHtml}</span>${dupeTag}
       <div class="chip-actions">
         <button class="chip-action chip-save" data-action="defer-single-tab" data-tab-url="${safeUrl}" data-tab-title="${safeTitle}" title="Save for later">
           <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M17.593 3.322c1.1.128 1.907 1.077 1.907 2.185V21L12 17.25 4.5 21V5.507c0-1.108.806-2.057 1.907-2.185a48.507 48.507 0 0 1 11.186 0Z" /></svg>
@@ -861,7 +1003,7 @@ function renderDomainCard(group) {
         </button>
       </div>
     </div>`;
-  }).join('') + (extraCount > 0 ? buildOverflowChips(uniqueTabs.slice(8), urlCounts) : '');
+  }).join('') + (extraCount > 0 ? buildOverflowChips(uniqueTabs.slice(8), urlCounts, hintMap) : '');
 
   let actionsHtml = `
     <button class="action-btn close-tabs" data-action="close-domain-tabs" data-domain-id="${stableId}">

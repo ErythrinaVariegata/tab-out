@@ -366,9 +366,14 @@ header {
   border-bottom: 1px solid rgba(154, 145, 138, 0.1);
   position: relative;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   line-height: 1.4;
+}
+
+/* When chip has no URL hint (single line), re-center favicon vertically */
+.page-chip .chip-favicon {
+  margin-top: 2px;
 }
 
 .page-chip:last-child,
@@ -384,13 +389,12 @@ header {
   border-radius: 2px;
 }
 
-/* Title text — wraps naturally, no truncation */
+/* Title text — wraps naturally, up to 3 lines (title + optional URL hint line) */
 .chip-text {
   flex: 1;
   min-width: 0;
-  /* Show up to 2 lines, then ellipsis */
   display: -webkit-box;
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
@@ -399,6 +403,17 @@ header {
 .chip-dupe-badge {
   color: var(--accent-amber);
   font-weight: 600;
+}
+
+/* URL path hint — shown on a second line for tabs with identical names */
+.chip-url-hint {
+  display: block;
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 400;
+  opacity: 0.7;
+  margin-top: 1px;
+  line-height: 1.3;
 }
 
 /* Duplicate border highlight */
